@@ -1,6 +1,13 @@
 import js from "@eslint/js";
 
 export default [
+	{
+		ignores: [
+			"lib/**",
+			"src/lib/readability/**",
+			"src/lib/mhtml-to-html/vendor/**"
+		]
+	},
 	js.configs.recommended,
 	{
 		languageOptions: {
@@ -26,6 +33,14 @@ export default [
 			"no-console": [
 				"warn"
 			]
+		}
+	},
+	{
+		files: ["test/**"],
+		languageOptions: {
+			globals: {
+				Headers: "readonly"
+			}
 		}
 	}
 ];

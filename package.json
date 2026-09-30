@@ -6,16 +6,18 @@
 	"license": "AGPL-3.0-or-later",
 	"scripts": {
 		"dev": "npx rollup -c rollup.config.dev.js",
-		"build": "./build-extension.sh"
+		"build": "./build-extension.sh",
+		"test": "node --test"
 	},
 	"type": "module",
 	"dependencies": {
-		"single-file-core": "1.5.84"
+		"single-file-core": "^1.6.5"
 	},
 	"devDependencies": {
-		"eslint": "^10.0.0",
+		"@eslint/js": "^10.0.1",
 		"@rollup/plugin-node-resolve": "16.0.3",
-		"@rollup/plugin-terser": "0.4.4",
+		"@rollup/plugin-terser": "1.0.0",
+		"eslint": "^10.0.0",
 		"rollup": "^4.57.1"
 	},
 	"overrides": {

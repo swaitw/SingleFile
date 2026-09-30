@@ -25,6 +25,12 @@
 
 import { download } from "./download-util.js";
 import * as tabsData from "./tabs-data.js";
+import { normalizeLayout } from "./../../ui/common/menu-layout.js";
+import {
+	DEFAULT_REPLACED_CHARACTERS as DEFAULT_FILENAME_REPLACED_CHARACTERS,
+	DEFAULT_REPLACEMENT_CHARACTERS as DEFAULT_FILENAME_REPLACEMENT_CHARACTERS
+} from "./../../ui/common/filename-replacement.js";
+import { DEFAULT_MAX_APPENDED_DATA_LENGTH } from "single-file-core/processors/compression/compression-constants.js";
 
 const CURRENT_PROFILE_NAME = "-";
 const DEFAULT_PROFILE_NAME = "__Default_Settings__";
@@ -33,6 +39,7 @@ const REGEXP_RULE_PREFIX = "regexp:";
 const PROFILE_NAME_PREFIX = "profile_";
 const EXTERNAL_CAPTURE_ALLOWED_EXTENSION_IDS_KEY = "externalCaptureAllowedExtensionIds";
 const EXTERNAL_CAPTURE_DENIED_EXTENSION_IDS_KEY = "externalCaptureDeniedExtensionIds";
+const MENU_LAYOUT_KEY = "menuLayout";
 
 const IS_NOT_SAFARI = !/Safari/.test(navigator.userAgent) || /Chrome/.test(navigator.userAgent) || /Vivaldi/.test(navigator.userAgent) || /OPR/.test(navigator.userAgent);
 const IS_MOBILE_FIREFOX = /Mobile.*Firefox/.test(navigator.userAgent);
@@ -50,9 +57,17 @@ const NATIVE_API_API_SUPPORTED = IS_NOT_SAFARI;
 const WEB_BLOCKING_API_SUPPORTED = IS_NOT_SAFARI;
 const EXTERNAL_CAPTURE_SUPPORTED = IS_NOT_SAFARI;
 const SHARE_API_SUPPORTED = navigator.canShare && navigator.canShare({ files: [new File([new Blob([""], { type: "text/html" })], "test.html")] });
+const BROWSER_MENUS_API_SUPPORTED = Boolean(browser.menus && browser.menus.onClicked && browser.menus.create && browser.menus.update && browser.menus.removeAll);
 const LEGACY_FILENAME_REPLACED_CHARACTERS = ["~", "+", "\\\\", "?", "%", "*", ":", "|", "\"", "<", ">", "\u0000-\u001f", "\u007f"];
-const DEFAULT_FILENAME_REPLACED_CHARACTERS = ["~", "+", "?", "%", "*", ":", "|", "\"", "<", ">", "\\\\", "\x00-\x1f", "\x7F"];
-const DEFAULT_FILENAME_REPLACEMENT_CHARACTERS = ["～", "＋", "？", "％", "＊", "：", "｜", "＂", "＜", "＞", "＼"];
+const DEPRECATED_OPTION_NAMES = {
+	loadDeferredImages: "loadDeferredContent",
+	loadDeferredImagesMaxIdleTime: "loadDeferredContentMaxIdleTime",
+	loadDeferredImagesBlockCookies: "loadDeferredContentBlockCookies",
+	loadDeferredImagesBlockStorage: "loadDeferredContentBlockStorage",
+	loadDeferredImagesKeepZoomLevel: "loadDeferredContentKeepZoomLevel",
+	loadDeferredImagesBeforeFrames: "loadDeferredContentBeforeFrames",
+	loadDeferredImagesDispatchScrollEvent: null
+};
 
 const DEFAULT_CONFIG = {
 	removeHiddenElements: true,
@@ -61,18 +76,19 @@ const DEFAULT_CONFIG = {
 	removeUnusedFonts: true,
 	removeFrames: false,
 	compressHTML: true,
-	compressCSS: false,
-	loadDeferredImages: true,
-	loadDeferredImagesMaxIdleTime: 1500,
-	loadDeferredImagesBlockCookies: false,
-	loadDeferredImagesBlockStorage: false,
-	loadDeferredImagesKeepZoomLevel: false,
-	loadDeferredImagesDispatchScrollEvent: false,
-	loadDeferredImagesBeforeFrames: false,
+	loadDeferredContent: true,
+	loadDeferredContentMaxIdleTime: 1500,
+	loadDeferredContentBlockCookies: false,
+	loadDeferredContentBlockStorage: false,
+	loadDeferredContentKeepZoomLevel: false,
+	loadDeferredContentDispatchScrollEvent: true,
+	loadDeferredContentBeforeFrames: false,
+	loadDeferredContentMinZoomFactor: 0,
 	filenameTemplate: "%if-empty<{page-title}|No title> ({date-locale} {time-locale}).{filename-extension}",
 	infobarTemplate: "",
 	includeInfobar: !IS_NOT_SAFARI,
 	openInfobar: false,
+	animateInfobar: true,
 	confirmInfobarContent: false,
 	autoClose: false,
 	confirmFilename: false,
@@ -152,12 +168,15 @@ const DEFAULT_CONFIG = {
 	disableCompression: false,
 	extractDataFromPage: false,
 	preventAppendedData: false,
+	maxAppendedDataLength: DEFAULT_MAX_APPENDED_DATA_LENGTH,
 	insertEmbeddedImage: false,
 	insertEmbeddedScreenshotImage: false,
 	insertTextBody: false,
 	autoSaveExternalSave: false,
 	insertMetaNoIndex: false,
 	insertMetaCSP: true,
+	insertCanonicalLink: true,
+	readMaffMetadata: false,
 	passReferrerOnError: false,
 	password: "",
 	insertSingleFileComment: true,
@@ -186,6 +205,7 @@ const DEFAULT_CONFIG = {
 	delayBeforeProcessing: 0,
 	delayAfterProcessing: 0,
 	_migratedTemplateFormat: true,
+	_migratedDeferredContentOptions: true,
 	saveToRestFormApiUrl: "",
 	saveToRestFormApiFileFieldName: "",
 	saveToRestFormApiUrlFieldName: "",
@@ -204,7 +224,8 @@ const DEFAULT_CONFIG = {
 	infobarPositionLeft: "",
 	removeNoScriptTags: true,
 	customShortcut: null,
-	imageReductionFactor: 1
+	imageReductionFactor: 1,
+	imageQuality: 0.8
 };
 
 const DEFAULT_RULES = [{
@@ -247,6 +268,7 @@ export {
 	DEFAULT_PROFILE_NAME,
 	DISABLED_PROFILE_NAME,
 	CURRENT_PROFILE_NAME,
+	PROFILE_NAME_PREFIX,
 	BACKGROUND_SAVE_SUPPORTED,
 	AUTOCLOSE_SUPPORTED,
 	BADGE_COLOR_SUPPORTED,
@@ -261,9 +283,12 @@ export {
 	WEB_BLOCKING_API_SUPPORTED,
 	EXTERNAL_CAPTURE_SUPPORTED,
 	SHARE_API_SUPPORTED,
+	BROWSER_MENUS_API_SUPPORTED,
 	getConfig as get,
 	getRule,
 	getOptions,
+	getMenuLayout,
+	MENU_LAYOUT_KEY,
 	getExternalCapturePermissions,
 	setExternalCapturePermissions,
 	getProfiles,
@@ -320,6 +345,18 @@ async function upgrade() {
 			profile.filenameTemplate = updateFilenameTemplate(profile.filenameTemplate);
 			profile._migratedTemplateFormat = true;
 		}
+		if (!profile._migratedDeferredContentOptions) {
+			Object.keys(DEPRECATED_OPTION_NAMES).forEach(deprecatedName => {
+				const optionName = DEPRECATED_OPTION_NAMES[deprecatedName];
+				if (profile[deprecatedName] !== undefined) {
+					if (optionName && profile[optionName] === undefined) {
+						profile[optionName] = profile[deprecatedName];
+					}
+					delete profile[deprecatedName];
+				}
+			});
+			profile._migratedDeferredContentOptions = true;
+		}
 		for (const key of Object.keys(DEFAULT_CONFIG)) {
 			if (profile[key] === undefined) {
 				profile[key] = DEFAULT_CONFIG[key];
@@ -362,7 +399,48 @@ async function getConfig() {
 	const { maxParallelWorkers, processInForeground } = await configStorage.get(["maxParallelWorkers", "processInForeground"]);
 	const rules = await getRules();
 	const profiles = await getProfiles();
-	return { profiles, rules, maxParallelWorkers, processInForeground };
+	const menuLayout = await getMenuLayout();
+	const config = { profiles, rules, maxParallelWorkers, processInForeground };
+	if (menuLayout) {
+		config.menuLayout = menuLayout;
+	}
+	return config;
+}
+
+async function getMenuLayout() {
+	await pendingUpgradePromise;
+	const data = await configStorage.get([MENU_LAYOUT_KEY]);
+	return normalizeLayout(data[MENU_LAYOUT_KEY]);
+}
+
+async function setMenuLayout(menuLayout) {
+	await pendingUpgradePromise;
+	const layout = normalizeLayout(menuLayout);
+	if (layout) {
+		await configStorage.set({ [MENU_LAYOUT_KEY]: layout });
+	} else {
+		await configStorage.remove([MENU_LAYOUT_KEY]);
+	}
+}
+
+async function updateMenuLayoutProfile(profileName, newProfileName) {
+	const menuLayout = await getMenuLayout();
+	if (menuLayout) {
+		const updateEntries = entries => entries.forEach(entry => {
+			if (entry.profile == profileName) {
+				if (newProfileName) {
+					entry.profile = newProfileName;
+				} else {
+					delete entry.profile;
+				}
+			}
+			if (entry.children) {
+				updateEntries(entry.children);
+			}
+		});
+		Object.keys(menuLayout).forEach(surface => updateEntries(menuLayout[surface]));
+		await setMenuLayout(menuLayout);
+	}
 }
 
 async function getExternalCapturePermissions() {
@@ -431,9 +509,16 @@ async function onMessage(message) {
 		const maxParallelWorkers = config.maxParallelWorkers;
 		const processInForeground = config.processInForeground;
 		const profileKeyNames = await getProfileKeyNames();
-		await configStorage.remove([...profileKeyNames, "rules", "maxParallelWorkers", "processInForeground"]);
+		await configStorage.remove([...profileKeyNames, "rules", "maxParallelWorkers", "processInForeground", MENU_LAYOUT_KEY]);
 		await configStorage.set({ rules, maxParallelWorkers, processInForeground });
+		await setMenuLayout(config.menuLayout);
 		Object.keys(profiles).forEach(profileName => setProfile(profileName, profiles[profileName]));
+	}
+	if (message.method.endsWith(".getMenuLayout")) {
+		return { menuLayout: await getMenuLayout() };
+	}
+	if (message.method.endsWith(".setMenuLayout")) {
+		await setMenuLayout(message.menuLayout);
 	}
 	if (message.method.endsWith(".deleteRules")) {
 		await deleteRules(message.profileName);
@@ -486,11 +571,17 @@ async function onMessage(message) {
 			NATIVE_API_API_SUPPORTED,
 			WEB_BLOCKING_API_SUPPORTED,
 			EXTERNAL_CAPTURE_SUPPORTED,
-			SHARE_API_SUPPORTED
+			SHARE_API_SUPPORTED,
+			BROWSER_MENUS_API_SUPPORTED,
+			DEFAULT_FILENAME_REPLACED_CHARACTERS,
+			DEFAULT_FILENAME_REPLACEMENT_CHARACTERS
 		};
 	}
 	if (message.method.endsWith(".getRules")) {
 		return getRules();
+	}
+	if (message.method.endsWith(".getProfileOptions")) {
+		return getProfileOptions(message.profileName);
 	}
 	if (message.method.endsWith(".getProfiles")) {
 		return getProfiles();
@@ -503,7 +594,7 @@ async function onMessage(message) {
 		const syncConfig = await browser.storage.sync.get();
 		if (!syncConfig || !syncConfig.rules) {
 			const profileKeyNames = await getProfileKeyNames();
-			const localConfig = await browser.storage.local.get(["rules", "maxParallelWorkers", "processInForeground", EXTERNAL_CAPTURE_ALLOWED_EXTENSION_IDS_KEY, EXTERNAL_CAPTURE_DENIED_EXTENSION_IDS_KEY, ...profileKeyNames]);
+			const localConfig = await browser.storage.local.get(["rules", "maxParallelWorkers", "processInForeground", EXTERNAL_CAPTURE_ALLOWED_EXTENSION_IDS_KEY, EXTERNAL_CAPTURE_DENIED_EXTENSION_IDS_KEY, MENU_LAYOUT_KEY, ...profileKeyNames]);
 			await browser.storage.sync.set(localConfig);
 		}
 		configStorage = browser.storage.sync;
@@ -522,7 +613,13 @@ async function onMessage(message) {
 				externalCaptureAllowedExtensionIds: syncConfig.externalCaptureAllowedExtensionIds || [],
 				externalCaptureDeniedExtensionIds: syncConfig.externalCaptureDeniedExtensionIds || []
 			});
+			if (syncConfig[MENU_LAYOUT_KEY]) {
+				await browser.storage.local.set({ [MENU_LAYOUT_KEY]: syncConfig[MENU_LAYOUT_KEY] });
+			}
 			const profiles = {};
+			Object.keys(syncConfig)
+				.filter(keyName => keyName.startsWith(PROFILE_NAME_PREFIX))
+				.forEach(keyName => profiles[keyName] = syncConfig[keyName]);
 			await browser.storage.local.set(profiles);
 		}
 		configStorage = browser.storage.local;
@@ -566,8 +663,15 @@ async function getOptions(url, autoSave) {
 	} else {
 		selectedProfileName = tabProfileName;
 	}
-	const profile = await getProfile(selectedProfileName);
-	return Object.assign({ profileName: selectedProfileName }, profile);
+	return getProfileOptions(selectedProfileName);
+}
+
+async function getProfileOptions(profileName) {
+	const options = Object.assign({ profileName }, await getProfile(profileName));
+	if (!BACKGROUND_SAVE_SUPPORTED) {
+		options.backgroundSave = false;
+	}
+	return options;
 }
 
 async function updateProfile(profileName, profile) {
@@ -610,6 +714,7 @@ async function renameProfile(oldProfileName, profileName) {
 	const profile = await getProfile(oldProfileName);
 	await configStorage.remove([PROFILE_NAME_PREFIX + oldProfileName]);
 	await configStorage.set({ [PROFILE_NAME_PREFIX + profileName]: profile, rules });
+	await updateMenuLayoutProfile(oldProfileName, profileName);
 }
 
 async function deleteProfile(profileName) {
@@ -636,6 +741,7 @@ async function deleteProfile(profileName) {
 	});
 	configStorage.remove([PROFILE_NAME_PREFIX + profileName]);
 	await configStorage.set({ rules });
+	await updateMenuLayoutProfile(profileName);
 }
 
 async function getRules() {
@@ -725,18 +831,18 @@ async function setDropboxAuthInfo(authInfo) {
 }
 
 async function removeAuthInfo() {
-	let authInfo = getAuthInfo();
-	if (authInfo.revokableAccessToken) {
-		setAuthInfo({ revokableAccessToken: authInfo.revokableAccessToken });
+	const authInfo = await getAuthInfo();
+	if (authInfo && authInfo.revokableAccessToken) {
+		await setAuthInfo({ revokableAccessToken: authInfo.revokableAccessToken });
 	} else {
 		await configStorage.remove(["authInfo"]);
 	}
 }
 
 async function removeDropboxAuthInfo() {
-	let authInfo = getDropboxAuthInfo();
-	if (authInfo.revokableAccessToken) {
-		setDropboxAuthInfo({ revokableAccessToken: authInfo.revokableAccessToken });
+	const authInfo = await getDropboxAuthInfo();
+	if (authInfo && authInfo.revokableAccessToken) {
+		await setDropboxAuthInfo({ revokableAccessToken: authInfo.revokableAccessToken });
 	} else {
 		await configStorage.remove(["dropboxAuthInfo"]);
 	}
@@ -748,7 +854,7 @@ async function resetProfiles() {
 	delete allTabsData.profileName;
 	await tabsData.set(allTabsData);
 	let profileKeyNames = await getProfileKeyNames();
-	await configStorage.remove([...profileKeyNames, "rules", "maxParallelWorkers", "processInForeground", EXTERNAL_CAPTURE_ALLOWED_EXTENSION_IDS_KEY, EXTERNAL_CAPTURE_DENIED_EXTENSION_IDS_KEY]);
+	await configStorage.remove([...profileKeyNames, "rules", "maxParallelWorkers", "processInForeground", EXTERNAL_CAPTURE_ALLOWED_EXTENSION_IDS_KEY, EXTERNAL_CAPTURE_DENIED_EXTENSION_IDS_KEY, MENU_LAYOUT_KEY]);
 	await upgrade();
 }
 
@@ -762,7 +868,11 @@ async function resetProfile(profileName) {
 
 async function exportConfig() {
 	const config = await getConfig();
-	const textContent = JSON.stringify({ profiles: config.profiles, rules: config.rules, maxParallelWorkers: config.maxParallelWorkers, processInForeground: config.processInForeground }, null, 2);
+	const exportedConfig = { profiles: config.profiles, rules: config.rules, maxParallelWorkers: config.maxParallelWorkers, processInForeground: config.processInForeground };
+	if (config.menuLayout) {
+		exportedConfig.menuLayout = config.menuLayout;
+	}
+	const textContent = JSON.stringify(exportedConfig, null, 2);
 	const filename = `singlefile-settings-${(new Date()).toISOString().replace(/:/g, "_")}.json`;
 	if (BACKGROUND_SAVE_SUPPORTED) {
 		const url = URL.createObjectURL(new Blob([textContent], { type: "text/json" }));
@@ -792,8 +902,12 @@ async function importConfig(config) {
 		delete allTabsData.profileName;
 		await tabsData.set(allTabsData);
 	}
-	await configStorage.remove([...profileKeyNames, "rules", "maxParallelWorkers", "processInForeground"]);
+	await configStorage.remove([...profileKeyNames, "rules", "maxParallelWorkers", "processInForeground", MENU_LAYOUT_KEY]);
 	const newConfig = { rules: config.rules, maxParallelWorkers: config.maxParallelWorkers, processInForeground: config.processInForeground };
+	const menuLayout = normalizeLayout(config.menuLayout);
+	if (menuLayout) {
+		newConfig[MENU_LAYOUT_KEY] = menuLayout;
+	}
 	Object.keys(config.profiles).forEach(profileName => newConfig[PROFILE_NAME_PREFIX + profileName] = config.profiles[profileName]);
 	await configStorage.set(newConfig);
 	await upgrade();

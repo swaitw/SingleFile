@@ -43,6 +43,7 @@ import { RestFormApi } from "../../lib/../lib/rest-form-api/index.js";
 
 const partialContents = new Map();
 const tabData = new Map();
+const viewerBlobURLs = new Map();
 const SCOPES = ["https://www.googleapis.com/auth/drive.file"];
 const CONFLICT_ACTION_SKIP = "skip";
 const CONFLICT_ACTION_UNIQUIFY = "uniquify";
@@ -59,6 +60,14 @@ if (gDriveOauth2) {
 }
 const gDrive = new GDrive(GDRIVE_CLIENT_ID, GDRIVE_CLIENT_KEY, SCOPES);
 const dropbox = new Dropbox(DROPBOX_CLIENT_ID, DROPBOX_CLIENT_KEY);
+
+browser.tabs.onRemoved.addListener(tabId => {
+	const blobURL = viewerBlobURLs.get(tabId);
+	if (blobURL) {
+		viewerBlobURLs.delete(tabId);
+		URL.revokeObjectURL(blobURL);
+	}
+});
 
 export {
 	onMessage,
@@ -125,14 +134,19 @@ async function onMessage(message, sender) {
 async function downloadTabPage(message, tab) {
 	const tabId = tab.id;
 	let contents;
-	if (message.blobURL) {
+	const messageBlob = message.blob instanceof Blob && message.blob.size ? message.blob : null;
+	if (messageBlob || message.blobURL) {
 		try {
 			if (message.compressContent) {
-				message.pageData = await yabson.parse(new Uint8Array(await (await fetch(message.blobURL)).arrayBuffer()));
+				const buffer = messageBlob ? await messageBlob.arrayBuffer() : await (await fetch(message.blobURL)).arrayBuffer();
+				message.pageData = await yabson.parse(new Uint8Array(buffer));
 				await downloadCompressedContent(message, tab);
 			} else {
-				message.content = await (await fetch(message.blobURL)).text();
-				await downloadContent([message.content], tab, tab.incognito, message);
+				const blob = messageBlob || await (await fetch(message.blobURL)).blob();
+				if (!messageBlob) {
+					message.url = message.blobURL;
+				}
+				await downloadContent(blob, tab, tab.incognito, message);
 			}
 			// eslint-disable-next-line no-unused-vars
 		} catch (error) {
@@ -167,13 +181,13 @@ async function downloadTabPage(message, tab) {
 			contents = [message.content];
 		}
 		if (!message.truncated || message.finished) {
-			await downloadContent(contents, tab, tab.incognito, message);
+			await downloadContent(new Blob(contents, { type: message.mimeType }), tab, tab.incognito, message);
 		}
 	}
 	return {};
 }
 
-async function downloadContent(contents, tab, incognito, message) {
+async function downloadContent(blob, tab, incognito, message) {
 	const tabId = tab.id;
 	try {
 		let skipped;
@@ -189,16 +203,16 @@ async function downloadContent(contents, tab, incognito, message) {
 			let response;
 			if (message.openEditor) {
 				ui.onEdit(tabId);
-				await editor.open({ tabIndex: tab.index + 1, filename: message.filename, content: contents.join(""), url: message.originalUrl });
+				await editor.open({ tabIndex: tab.index + 1, filename: message.filename, content: await blob.text(), url: message.originalUrl });
 			} else if (message.saveToClipboard) {
-				message.content = contents.join("");
+				message.content = await blob.text();
 				saveToClipboard(message);
 			} else if (message.saveWithWebDAV) {
-				response = await saveWithWebDAV(message.taskId, encodeSharpCharacter(message.filename), contents.join(""), message.webDAVURL, message.webDAVUser, message.webDAVPassword, { filenameConflictAction: message.filenameConflictAction, prompt });
+				response = await saveWithWebDAV(message.taskId, encodeSharpCharacter(message.filename), blob, message.webDAVURL, message.webDAVUser, message.webDAVPassword, { filenameConflictAction: message.filenameConflictAction, prompt });
 			} else if (message.saveWithMCP) {
-				response = await saveWithMCP(message.taskId, encodeSharpCharacter(message.filename), contents.join(""), message.mcpServerUrl, message.mcpAuthToken, { filenameConflictAction: message.filenameConflictAction, prompt });
+				response = await saveWithMCP(message.taskId, encodeSharpCharacter(message.filename), blob, message.mcpServerUrl, message.mcpAuthToken, { filenameConflictAction: message.filenameConflictAction, prompt });
 			} else if (message.saveToGDrive) {
-				await saveToGDrive(message.taskId, encodeSharpCharacter(message.filename), new Blob(contents, { type: message.mimeType }), {
+				await saveToGDrive(message.taskId, encodeSharpCharacter(message.filename), blob, {
 					forceWebAuthFlow: message.forceWebAuthFlow
 				}, {
 					onProgress: (offset, size) => ui.onUploadProgress(tabId, offset, size),
@@ -206,13 +220,13 @@ async function downloadContent(contents, tab, incognito, message) {
 					prompt
 				});
 			} else if (message.saveToDropbox) {
-				await saveToDropbox(message.taskId, encodeSharpCharacter(message.filename), new Blob(contents, { type: message.mimeType }), {
+				await saveToDropbox(message.taskId, encodeSharpCharacter(message.filename), blob, {
 					onProgress: (offset, size) => ui.onUploadProgress(tabId, offset, size),
 					filenameConflictAction: message.filenameConflictAction,
 					prompt
 				});
 			} else if (message.saveToGitHub) {
-				response = await saveToGitHub(message.taskId, encodeSharpCharacter(message.filename), contents.join(""), message.githubToken, message.githubUser, message.githubRepository, message.githubBranch, {
+				response = await saveToGitHub(message.taskId, encodeSharpCharacter(message.filename), blob, message.githubToken, message.githubUser, message.githubRepository, message.githubBranch, {
 					filenameConflictAction: message.filenameConflictAction,
 					prompt
 				});
@@ -220,7 +234,7 @@ async function downloadContent(contents, tab, incognito, message) {
 			} else if (message.saveWithCompanion) {
 				await companion.save({
 					filename: message.filename,
-					content: message.content,
+					content: await blob.text(),
 					title: message.title,
 					url: message.originalUrl,
 					filenameConflictAction: message.filenameConflictAction
@@ -229,29 +243,33 @@ async function downloadContent(contents, tab, incognito, message) {
 				response = await saveToRestFormApi(
 					message.taskId,
 					message.filename,
-					contents.join(""),
-					tab.url,
+					blob,
+					message.originalUrl,
 					message.saveToRestFormApiToken,
 					message.saveToRestFormApiUrl,
 					message.saveToRestFormApiFileFieldName,
 					message.saveToRestFormApiUrlFieldName
 				);
 			} else if (message.saveToS3) {
-				response = await saveToS3(message.taskId, encodeSharpCharacter(message.filename), new Blob(contents, { type: message.mimeType }), message.S3Domain, message.S3Region, message.S3Bucket, message.S3AccessKey, message.S3SecretKey, {
+				response = await saveToS3(message.taskId, encodeSharpCharacter(message.filename), blob, message.S3Domain, message.S3Region, message.S3Bucket, message.S3AccessKey, message.S3SecretKey, {
 					filenameConflictAction: message.filenameConflictAction,
 					prompt
 				});
 			} else {
-				message.url = URL.createObjectURL(new Blob(contents, { type: message.mimeType }));
+				if (!message.url) {
+					message.url = URL.createObjectURL(blob);
+				}
 				response = await downloadPage(message, {
 					confirmFilename: message.confirmFilename,
 					incognito,
 					filenameConflictAction: message.filenameConflictAction,
 					filenameReplacementCharacter: message.filenameReplacementCharacter,
+					promptConflictingFilename: filename => promptConflictingFilename(tabId, filename),
 					bookmarkId: message.bookmarkId,
 					replaceBookmarkURL: message.replaceBookmarkURL,
 					includeInfobar: message.includeInfobar,
 					openInfobar: message.openInfobar,
+					animateInfobar: message.animateInfobar,
 					infobarPositionAbsolute: message.infobarPositionAbsolute,
 					infobarPositionTop: message.infobarPositionTop,
 					infobarPositionBottom: message.infobarPositionBottom,
@@ -267,11 +285,7 @@ async function downloadContent(contents, tab, incognito, message) {
 			}
 			ui.onEnd(tabId);
 			if (message.openSavedPage && !message.openEditor) {
-				const createTabProperties = { active: true, url: "/src/ui/pages/viewer.html?blobURI=" + URL.createObjectURL(new Blob(contents, { type: message.mimeType })), windowId: tab.windowId };
-				if (tab.index != null) {
-					createTabProperties.index = tab.index + 1;
-				}
-				browser.tabs.create(createTabProperties);
+				await openViewerTab(tab, URL.createObjectURL(blob));
 			}
 		}
 	} catch (error) {
@@ -309,6 +323,7 @@ async function downloadCompressedContent(message, tab) {
 				disableCompression: message.disableCompression,
 				extractDataFromPage: message.extractDataFromPage,
 				preventAppendedData: message.preventAppendedData,
+				maxAppendedDataLength: message.maxAppendedDataLength,
 				insertCanonicalLink: message.insertCanonicalLink,
 				insertMetaNoIndex: message.insertMetaNoIndex,
 				insertMetaCSP: message.insertMetaCSP,
@@ -368,7 +383,7 @@ async function downloadCompressedContent(message, tab) {
 					message.taskId,
 					message.filename,
 					blob,
-					tab.url,
+					message.originalUrl,
 					message.saveToRestFormApiToken,
 					message.saveToRestFormApiUrl,
 					message.saveToRestFormApiFileFieldName,
@@ -386,10 +401,12 @@ async function downloadCompressedContent(message, tab) {
 					incognito: tab.incognito,
 					filenameConflictAction: message.filenameConflictAction,
 					filenameReplacementCharacter: message.filenameReplacementCharacter,
+					promptConflictingFilename: filename => promptConflictingFilename(tabId, filename),
 					bookmarkId: message.bookmarkId,
 					replaceBookmarkURL: message.replaceBookmarkURL,
 					includeInfobar: message.includeInfobar,
 					openInfobar: message.openInfobar,
+					animateInfobar: message.animateInfobar,
 					infobarPositionAbsolute: message.infobarPositionAbsolute,
 					infobarPositionTop: message.infobarPositionTop,
 					infobarPositionBottom: message.infobarPositionBottom,
@@ -402,11 +419,7 @@ async function downloadCompressedContent(message, tab) {
 			}
 			ui.onEnd(tabId);
 			if (message.openSavedPage && !message.openEditor) {
-				const createTabProperties = { active: true, url: "/src/ui/pages/viewer.html?compressed&blobURI=" + URL.createObjectURL(blob), windowId: tab.windowId };
-				if (tab.index != null) {
-					createTabProperties.index = tab.index + 1;
-				}
-				browser.tabs.create(createTabProperties);
+				await openViewerTab(tab, URL.createObjectURL(blob), { compressed: true });
 			}
 		}
 	} catch (error) {
@@ -419,6 +432,15 @@ async function downloadCompressedContent(message, tab) {
 			URL.revokeObjectURL(message.url);
 		}
 	}
+}
+
+async function openViewerTab(tab, blobURL, { compressed } = {}) {
+	const createTabProperties = { active: true, url: "/src/ui/pages/viewer.html?" + (compressed ? "compressed&" : "") + "blobURI=" + blobURL, windowId: tab.windowId };
+	if (tab.index != null) {
+		createTabProperties.index = tab.index + 1;
+	}
+	const viewerTab = await browser.tabs.create(createTabProperties);
+	viewerBlobURLs.set(viewerTab.id, blobURL);
 }
 
 function encodeSharpCharacter(path) {
@@ -476,7 +498,7 @@ async function saveToGitHub(taskId, filename, content, githubToken, githubUser, 
 			return await client.upload(filename, content, { filenameConflictAction, prompt });
 		}
 	} catch (error) {
-		throw new Error(error.message + " (GitHub)");
+		throw new Error(error.message + " (GitHub)", { cause: error });
 	}
 }
 
@@ -489,7 +511,7 @@ async function saveToS3(taskId, filename, blob, domain, region, bucket, accessKe
 			return await client.upload(filename, blob, { filenameConflictAction, prompt });
 		}
 	} catch (error) {
-		throw new Error(error.message + " (S3)");
+		throw new Error(error.message + " (S3)", { cause: error });
 	}
 }
 
@@ -502,7 +524,7 @@ async function saveWithWebDAV(taskId, filename, content, url, username, password
 			return await client.upload(filename, content, { filenameConflictAction, prompt });
 		}
 	} catch (error) {
-		throw new Error(error.message + " (WebDAV)");
+		throw new Error(error.message + " (WebDAV)", { cause: error });
 	}
 }
 
@@ -515,7 +537,7 @@ async function saveWithMCP(taskId, filename, content, serverUrl, authToken, { fi
 			return await client.upload(filename, content, { filenameConflictAction, prompt });
 		}
 	} catch (error) {
-		throw new Error(error.message + " (MCP)");
+		throw new Error(error.message + " (MCP)", { cause: error });
 	}
 }
 
@@ -536,7 +558,7 @@ async function saveToGDrive(taskId, filename, blob, authOptions, uploadOptions) 
 				if (error.message == "unknown_token") {
 					authInfo = await getAuthInfo(authOptions, true);
 				} else {
-					throw new Error(error.message + " (Google Drive)");
+					throw new Error(error.message + " (Google Drive)", { cause: error });
 				}
 			}
 			if (authInfo) {
@@ -546,7 +568,7 @@ async function saveToGDrive(taskId, filename, blob, authOptions, uploadOptions) 
 			}
 			return await saveToGDrive(taskId, filename, blob, authOptions, uploadOptions);
 		} else {
-			throw new Error(error.message + " (Google Drive)");
+			throw new Error(error.message + " (Google Drive)", { cause: error });
 		}
 	}
 }
@@ -568,7 +590,7 @@ async function saveToDropbox(taskId, filename, blob, uploadOptions) {
 				if (error.message == "unknown_token") {
 					authInfo = await getDropboxAuthInfo(true);
 				} else {
-					throw new Error(error.message + " (Dropbox)");
+					throw new Error(error.message + " (Dropbox)", { cause: error });
 				}
 			}
 			if (authInfo) {
@@ -578,7 +600,7 @@ async function saveToDropbox(taskId, filename, blob, uploadOptions) {
 			}
 			return await saveToDropbox(taskId, filename, blob, uploadOptions);
 		} else {
-			throw new Error(error.message + " (Dropbox)");
+			throw new Error(error.message + " (Dropbox)", { cause: error });
 		}
 	}
 }
@@ -586,11 +608,7 @@ async function saveToDropbox(taskId, filename, blob, uploadOptions) {
 async function testSkipSave(filename, options) {
 	let skipped, filenameConflictAction = options.filenameConflictAction;
 	if (filenameConflictAction == CONFLICT_ACTION_SKIP) {
-		const downloadItems = await browser.downloads.search({
-			filenameRegex: "(\\\\|/)" + getRegExp(filename) + "$",
-			exists: true
-		});
-		if (downloadItems.length) {
+		if (await fileExists(filename)) {
 			skipped = true;
 		} else {
 			filenameConflictAction = CONFLICT_ACTION_UNIQUIFY;
@@ -599,8 +617,23 @@ async function testSkipSave(filename, options) {
 	return { skipped, filenameConflictAction };
 }
 
+async function fileExists(filename) {
+	const downloadItems = await browser.downloads.search({
+		filenameRegex: "(\\\\|/)" + getRegExp(filename) + "$",
+		exists: true
+	});
+	return Boolean(downloadItems.length);
+}
+
 function promptFilename(tabId, filename) {
 	return browser.tabs.sendMessage(tabId, { method: "content.prompt", message: "Filename conflict, please enter a new filename", value: filename });
+}
+
+async function promptConflictingFilename(tabId, filename) {
+	while (filename && await fileExists(filename)) {
+		filename = await promptFilename(tabId, filename);
+	}
+	return filename;
 }
 
 async function downloadPage(pageData, options) {
@@ -613,7 +646,7 @@ async function downloadPage(pageData, options) {
 	if (options.incognito) {
 		downloadInfo.incognito = true;
 	}
-	const downloadData = await download(downloadInfo, options.filenameReplacementCharacter);
+	const downloadData = await download(downloadInfo, options.filenameReplacementCharacter, options.promptConflictingFilename);
 	if (downloadData.filename) {
 		let url = downloadData.filename;
 		if (!url.startsWith("file:")) {
@@ -651,7 +684,7 @@ async function saveToRestFormApi(taskId, filename, content, url, token, restApiU
 			return await client.upload(filename, content, url);
 		}
 	} catch (error) {
-		throw new Error(error.message + " (RestFormApi)");
+		throw new Error(error.message + " (RestFormApi)", { cause: error });
 	}
 }
 

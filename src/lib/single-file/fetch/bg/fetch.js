@@ -30,7 +30,8 @@ const MAX_CONTENT_SIZE = 8 * (1024 * 1024);
 export {
 	REQUEST_ID_HEADER_NAME,
 	referrers,
-	fetchResource
+	fetchResource,
+	parseHeaders
 };
 
 browser.runtime.onMessage.addListener((message, sender) => {
@@ -86,7 +87,7 @@ function fetchResource(url, options = {}, includeRequestId) {
 		xhrRequest.onreadystatechange = () => {
 			if (xhrRequest.readyState == XMLHttpRequest.DONE) {
 				if (xhrRequest.status || xhrRequest.response.byteLength) {
-					if ((xhrRequest.status == 401 || xhrRequest.status == 403 || xhrRequest.status == 404) && !includeRequestId) {
+					if (options.referrer && (xhrRequest.status == 401 || xhrRequest.status == 403 || xhrRequest.status == 404) && !includeRequestId) {
 						fetchResource(url, options, true)
 							.then(resolve)
 							.catch(reject);
@@ -94,7 +95,7 @@ function fetchResource(url, options = {}, includeRequestId) {
 						resolve({
 							arrayBuffer: xhrRequest.response,
 							array: Array.from(new Uint8Array(xhrRequest.response)),
-							headers: { "content-type": xhrRequest.getResponseHeader("Content-Type") },
+							headers: parseHeaders(xhrRequest.getAllResponseHeaders()),
 							status: xhrRequest.status
 						});
 					}
@@ -116,6 +117,13 @@ function fetchResource(url, options = {}, includeRequestId) {
 		}
 		xhrRequest.send();
 	});
+}
+
+function parseHeaders(rawHeaders) {
+	return rawHeaders.trim().split(/[\r\n]+/).map(line => {
+		const separatorIndex = line.indexOf(":");
+		return [line.substring(0, separatorIndex).trim(), line.substring(separatorIndex + 1).trim()];
+	}).filter(([name]) => name);
 }
 
 function setReferrer(requestId, referrer) {

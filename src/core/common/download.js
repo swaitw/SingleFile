@@ -55,7 +55,7 @@ export {
 };
 
 async function downloadPage(pageData, options) {
-	if (options.includeBOM) {
+	if (options.includeBOM && typeof pageData.content == "string") {
 		pageData.content = "\ufeff" + pageData.content;
 	}
 	const embeddedImage = options.embeddedImage;
@@ -96,12 +96,14 @@ async function downloadPage(pageData, options) {
 		defaultEditorMode: options.defaultEditorMode,
 		includeInfobar: options.includeInfobar,
 		openInfobar: options.openInfobar,
+		animateInfobar: options.animateInfobar,
 		warnUnsavedPage: options.warnUnsavedPage,
 		createRootDirectory: options.createRootDirectory,
 		selfExtractingArchive: options.selfExtractingArchive,
 		disableCompression: options.disableCompression,
 		embeddedImage: embeddedImage ? Array.from(embeddedImage) : null,
 		preventAppendedData: options.preventAppendedData,
+		maxAppendedDataLength: options.maxAppendedDataLength,
 		extractDataFromPage: options.extractDataFromPage,
 		insertCanonicalLink: options.insertCanonicalLink,
 		insertMetaNoIndex: options.insertMetaNoIndex,
@@ -141,11 +143,13 @@ async function downloadPage(pageData, options) {
 			const blobURL = URL.createObjectURL(blob);
 			message.filename = pageData.filename;
 			message.blobURL = blobURL;
+			message.blob = blob;
 			const result = await browser.runtime.sendMessage(message);
 			URL.revokeObjectURL(blobURL);
 			if (result.error) {
 				message.embeddedImage = embeddedImage;
 				message.blobURL = null;
+				message.blob = null;
 				message.pageData = pageData;
 				const serializer = yabson.getSerializer(message);
 				for await (const chunk of serializer) {
@@ -177,16 +181,19 @@ async function downloadPage(pageData, options) {
 			}
 			if (filename) {
 				message.filename = pageData.filename = filename;
-				const blobURL = URL.createObjectURL(new Blob([pageData.content], { type: pageData.mimeType }));
+				const blob = new Blob([pageData.content], { type: pageData.mimeType });
+				const blobURL = URL.createObjectURL(blob);
 				message.blobURL = blobURL;
+				message.blob = blob;
 				const result = await browser.runtime.sendMessage(message);
 				URL.revokeObjectURL(blobURL);
 				if (result.error) {
 					message.blobURL = null;
+					message.blob = null;
 					for (let blockIndex = 0; blockIndex * MAX_CONTENT_SIZE < pageData.content.length; blockIndex++) {
 						message.truncated = pageData.content.length > MAX_CONTENT_SIZE;
 						if (message.truncated) {
-							message.finished = (blockIndex + 1) * MAX_CONTENT_SIZE > pageData.content.length;
+							message.finished = (blockIndex + 1) * MAX_CONTENT_SIZE >= pageData.content.length;
 							message.content = pageData.content.substring(blockIndex * MAX_CONTENT_SIZE, (blockIndex + 1) * MAX_CONTENT_SIZE);
 						} else {
 							message.content = pageData.content;
@@ -252,9 +259,7 @@ async function sharePage(pageData, options) {
 			sharePageBar.hide();
 		} catch (error) {
 			sharePageBar.hide();
-			if (error.name === "AbortError") {
-				await sharePage(pageData, options);
-			} else {
+			if (error.name !== "AbortError") {
 				throw error;
 			}
 		}
